@@ -36,7 +36,16 @@ internal static class SteamClientData
 
                 try
                 {
-                    ReadAppInfo(table, payload, Path.Join(steamLocation, "appcache", "appinfo.vdf"));
+                    var shardDirectory = Path.Join(steamLocation, "appcache", "appinfo");
+
+                    if (Directory.Exists(shardDirectory))
+                    {
+                        ReadAppInfoShards(table, payload, shardDirectory);
+                    }
+                    else
+                    {
+                        ReadAppInfo(table, payload, Path.Join(steamLocation, "appcache", "appinfo.vdf"));
+                    }
                 }
                 catch (Exception e)
                 {
@@ -109,6 +118,75 @@ internal static class SteamClientData
         } while (true);
 
         table.AddRow($"Got {payload.Apps.Count} app tokens from appinfo.vdf");
+    }
+
+    // Newer Steam clients split the app info cache into appcache/appinfo/appinfo_XX.vdf shards.
+    // Each shard has a 44 byte header followed by a fixed size (80 byte) index with the app token.
+    private static void ReadAppInfoShards(Table table, Payload payload, string directory)
+    {
+        const uint ShardMagic = 0x07_56_44_2A;
+        const int HeaderSize = 44;
+        const int EntrySize = 80;
+        const int TokenOffsetInEntry = 24;
+
+        var files = Directory.GetFiles(directory, "appinfo_*.vdf");
+
+        if (files.Length == 0)
+        {
+            throw new InvalidDataException("No appinfo shard files found");
+        }
+
+        foreach (var file in files)
+        {
+            var name = Path.GetFileName(file);
+
+            using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new BinaryReader(fs);
+
+            if (fs.Length < HeaderSize)
+            {
+                throw new InvalidDataException($"Truncated appinfo shard {name}");
+            }
+
+            var magic = reader.ReadUInt32();
+
+            if (magic != ShardMagic)
+            {
+                throw new InvalidDataException($"Unknown appinfo shard magic in {name}: {magic:X}");
+            }
+
+            fs.Position = 16;
+            var entryCount = reader.ReadUInt32();
+            var indexSize = reader.ReadUInt32();
+
+            if (indexSize != (long)entryCount * EntrySize || HeaderSize + (long)indexSize > fs.Length)
+            {
+                throw new InvalidDataException($"Corrupt appinfo shard index in {name}");
+            }
+
+            for (var i = 0; i < entryCount; i++)
+            {
+                var entryStart = HeaderSize + ((long)i * EntrySize);
+
+                fs.Position = entryStart;
+                var appid = reader.ReadUInt32();
+
+                fs.Position = entryStart + TokenOffsetInEntry;
+                var token = reader.ReadUInt64();
+
+                if (token > 0)
+                {
+                    payload.Apps[appid.ToString(CultureInfo.InvariantCulture)] = token.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+        }
+
+        if (files.Length != 256)
+        {
+            table.AddRow(new Text($"Expected 256 appinfo shards but found {files.Length}", new Style(Color.Yellow)));
+        }
+
+        table.AddRow($"Got {payload.Apps.Count} app tokens from {files.Length} appinfo shards");
     }
 
     private static void ReadPackageInfo(Table table, Payload payload, string filename)
