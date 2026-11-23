@@ -159,7 +159,8 @@ internal static class SteamClientData
             var entryCount = reader.ReadUInt32();
             var indexSize = reader.ReadUInt32();
 
-            if (indexSize != (long)entryCount * EntrySize || HeaderSize + (long)indexSize > fs.Length)
+            // indexSize can be a few bytes larger than the entries (seen +4), so only require room for all entries
+            if (indexSize < (long)entryCount * EntrySize || HeaderSize + (long)indexSize > fs.Length)
             {
                 throw new InvalidDataException($"Corrupt appinfo shard index in {name}");
             }
