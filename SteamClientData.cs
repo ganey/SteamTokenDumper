@@ -121,13 +121,12 @@ internal static class SteamClientData
     }
 
     // Newer Steam clients split the app info cache into appcache/appinfo/appinfo_XX.vdf shards.
-    // Each shard has a 44 byte header followed by a fixed size (80 byte) index with the app token.
+    // Each shard has a 44 byte header followed by an index of variable-size entries containing the app token.
     private static void ReadAppInfoShards(Table table, Payload payload, string directory)
     {
         const uint ShardMagic = 0x07_56_44_2A;
         const int HeaderSize = 44;
-        const int EntrySize = 80;
-        const int TokenOffsetInEntry = 24;
+        const int EntryHeaderSize = 16;
 
         var files = Directory.GetFiles(directory, "appinfo_*.vdf");
 
@@ -158,27 +157,49 @@ internal static class SteamClientData
             fs.Position = 16;
             var entryCount = reader.ReadUInt32();
             var indexSize = reader.ReadUInt32();
+            var indexEnd = HeaderSize + (long)indexSize;
 
-            // indexSize can be a few bytes larger than the entries (seen +4), so only require room for all entries
-            if (indexSize < (long)entryCount * EntrySize || HeaderSize + (long)indexSize > fs.Length)
+            if (indexEnd > fs.Length)
             {
                 throw new InvalidDataException($"Corrupt appinfo shard index in {name}");
             }
 
+            fs.Position = HeaderSize;
+
             for (var i = 0; i < entryCount; i++)
             {
-                var entryStart = HeaderSize + ((long)i * EntrySize);
-
-                fs.Position = entryStart;
-                var appid = reader.ReadUInt32();
-
-                fs.Position = entryStart + TokenOffsetInEntry;
-                var token = reader.ReadUInt64();
-
-                if (token > 0)
+                if (fs.Position + EntryHeaderSize > indexEnd)
                 {
-                    payload.Apps[appid.ToString(CultureInfo.InvariantCulture)] = token.ToString(CultureInfo.InvariantCulture);
+                    throw new InvalidDataException($"Truncated appinfo shard index in {name}");
                 }
+
+                var appid = reader.ReadUInt32();
+                fs.Position += 8; // dataOffset + dataSize
+                var metaSize = reader.ReadUInt32();
+                var nextEntry = fs.Position + metaSize;
+
+                if (nextEntry > indexEnd)
+                {
+                    throw new InvalidDataException($"Appinfo shard entry out of bounds in {name}");
+                }
+
+                if (metaSize >= 16)
+                {
+                    fs.Position += 8; // changeNumber + lastUpdated
+                    var token = reader.ReadUInt64();
+
+                    if (token > 0)
+                    {
+                        payload.Apps[appid.ToString(CultureInfo.InvariantCulture)] = token.ToString(CultureInfo.InvariantCulture);
+                    }
+                }
+
+                fs.Position = nextEntry;
+            }
+
+            if (fs.Position != indexEnd)
+            {
+                throw new InvalidDataException($"Appinfo shard index size mismatch in {name}");
             }
         }
 
